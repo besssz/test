@@ -1,0 +1,77 @@
+#include <SPI.h>
+#include <mcp_can.h>
+
+const int SPI_CS_PIN = 10;
+MCP_CAN CAN(SPI_CS_PIN);
+
+void setup() {
+  Serial.begin(115200);
+
+  if (CAN.begin(MCP_STDEXT, CAN_100KBPS, MCP_8MHZ) == CAN_OK) {
+    Serial.println("MCP2515 Initialized Successfully!");
+  } else {
+    Serial.println("Error Initializing MCP2515...");
+  }
+
+  Serial.println("Menu:");
+  Serial.println("1. Read Engine RPM");
+  Serial.println("2. Read Vehicle Speed");
+  Serial.println("3. Clear Error Codes");
+  Serial.println("4. Live Streaming");
+}
+
+void loop() {
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    long id;
+    unsigned char len;
+    unsigned char buf[8];
+    CAN.readMsgBuf(&id, &len, buf);
+    processData(id, len, buf);
+  }
+
+  if (Serial.available() > 0) {
+    int option = Serial.parseInt();
+    switch (option) {
+      case 1:
+        requestEngineRpm();
+        break;
+      case 2:
+        requestVehicleSpeed();
+        break;
+      case 3:
+        clearErrorCodes();
+        break;
+      case 4:
+        liveStreaming();
+        break;
+      default:
+        Serial.println("Invalid option. Please try again.");
+        break;
+    }
+  }
+}
+
+void processData(long id, unsigned char len, unsigned char* buf) {
+  // Process and display received data based on message ID
+  // Implement your data processing logic here
+}
+
+void requestEngineRpm() {
+  // Send request for engine RPM data
+  // Implement your request logic here
+}
+
+void requestVehicleSpeed() {
+  // Send request for vehicle speed data
+  // Implement your request logic here
+}
+
+void clearErrorCodes() {
+  // Send request to clear error codes for all modules
+  // Implement your request logic here
+}
+
+void liveStreaming() {
+  // Start live streaming feature, periodically request and display data
+  // Implement your live streaming logic here
+}
