@@ -33,8 +33,10 @@ void loop() {
     int option = Serial.parseInt();
     switch (option) {
       case 1:
+        // Implement reading Engine RPM
         break;
       case 2:
+        // Implement reading Vehicle Speed
         break;
       case 3:
         readAllModuleCodes();
@@ -59,4 +61,58 @@ void readAllModuleCodes() {
 
 void liveStreaming() {
   // Start live streaming feature, periodically request and display data
+}
+#include <Canbus.h>
+#include <defaults.h>
+#include <global.h>
+#include <mcp2515.h>
+#include <mcp2515_defs.h>
+#include <LiquidCrystal.h>
+
+// Initialize the LCD with the pins connected
+LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+
+// Message IDs for RPM and Speed (based on resources)
+const unsigned int RPM_ID = 0x316;
+const unsigned int SPEED_ID = 0x153;
+
+void setup() {
+  Serial.begin(9600);
+  if (Canbus.init(CANSPEED_500)) {
+    Serial.println("CAN Init ok");
+  } else {
+    Serial.println("Can't init CAN");
+  }
+
+  // Set up the LCD's number of columns and rows
+  lcd.begin(16, 2);
+}
+
+void loop() {
+  tCAN message;
+  unsigned int rpm;
+  byte speed;
+
+  // Request and read RPM data
+  if (Canbus.read(&message) && message.id == RPM_ID) {
+    rpm = ((message.data[1] << 8) + message.data[2]) / 4;
+
+    // Display RPM on the LCD
+    lcd.setCursor(0, 0);
+    lcd.print("RPM: ");
+    lcd.print(rpm);
+  }
+
+  // Request and read Speed data
+  if (Canbus.read(&message) && message.id == SPEED_ID) {
+    speed = message.data[3];
+
+    // Display Speed on the LCD
+    lcd.setCursor(0, 1);
+    lcd.print("Speed: ");
+    lcd.print(speed);
+    lcd.print(" km/h");
+  }
+
+  delay(500);
 }
