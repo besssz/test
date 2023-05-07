@@ -1,0 +1,275 @@
+
+
+#include <SPI.h>
+#include <mcp_can.h>
+
+// Set the CS pin for the MCP2515
+const int SPI_CS_PIN = 10;
+
+// Create an instance of the MCP2515 library
+MCP_CAN CAN(SPI_CS_PIN);
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+
+  // Initialize the MCP2515
+  if (CAN.begin(MCP_STDEXT, CAN_100KBPS, MCP_8MHZ) == CAN_OK) {
+    Serial.println("MCP2515 Initialized Successfully!");
+  } else {
+    Serial.println("Error Initializing MCP2515...");
+  }
+}
+
+void loop() {
+  // Check if a new message has been received
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    // Create variables to store the message data
+    long id;
+    unsigned char len;
+    unsigned char buf[8];
+
+    // Read the message from the MCP2515
+    CAN.readMsgBuf(&id, &len, buf);
+
+    // Print the message data to the serial monitor
+    Serial.print("ID: ");
+    Serial.print(id, HEX);
+    Serial.print(" Data: ");
+    for (int i = 0; i < len; i++) {
+      Serial.print(buf[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
+  }
+}
+
+void readAllModuleCodes() {
+  // TODO: Implement code to read all module codes in the car
+
+  // Example: Send a diagnostic request message to the DME (Digital Motor Electronics) module
+  unsigned char dmeRequest[] = {0x12, 0x34, 0x56}; // Replace with actual request data
+  CAN.sendMsgBuf(0x7DF, 0, sizeof(dmeRequest), dmeRequest);
+
+  // TODO: Wait for a response from the DME module and interpret the data
+
+  // Example: Send a diagnostic request message to the ABS (Anti-lock Braking System) module
+  unsigned char absRequest[] = {0x78, 0x9A, 0xBC}; // Replace with actual request data
+  CAN.sendMsgBuf(0x7DF, 0, sizeof(absRequest), absRequest);
+
+  // TODO: Wait for a response from the ABS module and interpret the data
+}
+
+#include <SPI.h>
+#include <mcp_can.h>
+
+// Set the CS pin for the MCP2515
+const int SPI_CS_PIN = 10;
+
+// Create an instance of the MCP2515 library
+MCP_CAN CAN(SPI_CS_PIN);
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+
+  // Initialize the MCP2515
+  if (CAN.begin(MCP_STDEXT, CAN_100KBPS, MCP_8MHZ) == CAN_OK) {
+    Serial.println("MCP2515 Initialized Successfully!");
+  } else {
+    Serial.println("Error Initializing MCP2515...");
+  }
+}
+
+void loop() {
+  // Check if a new message has been received
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    // Create variables to store the message data
+    long id;
+    unsigned char len;
+    unsigned char buf[8];
+
+    // Read the message from the MCP2515
+    CAN.readMsgBuf(&id, &len, buf);
+
+    // Check if the message ID matches a known message from the DBC file
+    if (id == 0x1A6) {
+      // Extract and interpret the signal data from the message
+      int engineRPM = (buf[2] << 8) | buf[3];
+      Serial.print("Engine RPM: ");
+      Serial.println(engineRPM);
+    }
+  }
+}
+
+
+#include <SPI.h>
+#include <mcp_can.h>
+
+// Set the CS pin for the MCP2515
+const int SPI_CS_PIN = 10;
+
+// Create an instance of the MCP2515 library
+MCP_CAN CAN(SPI_CS_PIN);
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+
+  // Initialize the MCP2515
+  if (CAN.begin(MCP_STDEXT, CAN_100KBPS, MCP_8MHZ) == CAN_OK) {
+    Serial.println("MCP2515 Initialized Successfully!");
+  } else {
+    Serial.println("Error Initializing MCP2515...");
+  }
+
+  // Print the menu options
+  Serial.println("Menu:");
+  Serial.println("1. Read Engine RPM");
+  Serial.println("2. Read Vehicle Speed");
+}
+
+void loop() {
+  // Check if a new message has been received
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    // Create variables to store the message data
+    long id;
+    unsigned char len;
+    unsigned char buf[8];
+
+    // Read the message from the MCP2515
+    CAN.readMsgBuf(&id, &len, buf);
+
+    // Check if the message ID matches a known message from the DBC file
+    if (id == 0x1A6) {
+      // Extract and interpret the signal data from the message
+      int engineRPM = (buf[2] << 8) | buf[3];
+      Serial.print("Engine RPM: ");
+      Serial.println(engineRPM);
+    }
+  }
+
+  // Check if a menu option has been selected
+  if (Serial.available() > 0) {
+    int option = Serial.parseInt();
+    switch (option) {
+      case 1:
+        // Read and display the current engine RPM
+        break;
+      case 2:
+        // Read and display the current vehicle speed
+        break;
+      default:
+        // Invalid option selected
+        Serial.println("Invalid option. Please try again.");
+        break;
+    }
+  }
+}
+
+
+
+#include <SPI.h>
+#include <mcp_can.h>
+
+// Set the CS pin for the MCP2515
+const int SPI_CS_PIN = 10;
+
+// Create an instance of the MCP2515 library
+MCP_CAN CAN(SPI_CS_PIN);
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+
+  // Initialize the MCP2515
+  if (CAN.begin(MCP_STDEXT, CAN_100KBPS, MCP_8MHZ) == CAN_OK) {
+    Serial.println("MCP2515 Initialized Successfully!");
+  } else {
+    Serial.println("Error Initializing MCP2515...");
+  }
+
+  // Print the menu options
+  Serial.println("Menu:");
+  Serial.println("1. Read Engine RPM");
+  Serial.println("2. Read Vehicle Speed");
+  Serial.println("3. Read All Module Codes");
+}
+
+void loop() {
+  // Check if a new message has been received
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    // Create variables to store the message data
+    long id;
+    unsigned char len;
+    unsigned char buf[8];
+
+    // Read the message from the MCP2515
+    CAN.readMsgBuf(&id, &len, buf);
+
+    // Check if the message ID matches a known message from the DBC file
+    if (id == 0x1A6) {
+      // Extract and interpret the signal data from the message
+      int engineRPM = (buf[2] << 8) | buf[3];
+      Serial.print("Engine RPM: ");
+      Serial.println(engineRPM);
+    }
+  }
+
+  // Check if a menu option has been selected
+  if (Serial.available() > 0) {
+    int option = Serial.parseInt();
+    switch (option) {
+      case 1:
+        // Read and display the current engine RPM
+        break;
+      case 2:
+        // Read and display the current vehicle speed
+        break;
+      case 3:
+        // Read and display all module codes in the car
+        readAllModuleCodes();
+        break;
+      default:
+        // Invalid option selected
+        Serial.println("Invalid option. Please try again.");
+        break;
+    }
+  }
+}
+
+void readAllModuleCodes() {
+  // TODO: Implement code to read all module codes in the car
+}
+
+
+void readAllModuleCodes() {
+  // TODO: Implement code to read all module codes in the car
+
+  // Example: Send a diagnostic request message to the DME (Digital Motor Electronics) module
+  unsigned char dmeRequest[] = {0x12, 0x34, 0x56}; // Replace with actual request data
+  CAN.sendMsgBuf(0x7DF, 0, sizeof(dmeRequest), dmeRequest);
+
+  // TODO: Wait for a response from the DME module and interpret the data
+}
+void readAllModuleCodes() {
+  // TODO: Implement code to read all module codes in the car
+
+  // Example: Send a diagnostic request message to the DME (Digital Motor Electronics) module
+  unsigned char dmeRequest[] = {0x12, 0x34, 0x56}; // Replace with actual request data
+  CAN.sendMsgBuf(0x7DF, 0, sizeof(dmeRequest), dmeRequest);
+
+  // TODO: Wait for a response from the DME module and interpret the data
+
+  // Example: Send a diagnostic request message to the ABS (Anti-lock Braking System) module
+  unsigned char absRequest[] = {0x78, 0x9A, 0xBC}; // Replace with actual request data
+  CAN.sendMsgBuf(0x7DF, 0, sizeof(absRequest), absRequest);
+
+  // TODO: Wait for a response from the ABS module and interpret the data
+}
+
+
+
+
+
+
