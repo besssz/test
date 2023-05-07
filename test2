@@ -1,8 +1,18 @@
 #include <SPI.h>
 #include <mcp_can.h>
+#include <Canbus.h>
+#include <defaults.h>
+#include <global.h>
+#include <mcp2515.h>
+#include <mcp2515_defs.h>
+#include <LiquidCrystal.h>
 
 const int SPI_CS_PIN = 10;
 MCP_CAN CAN(SPI_CS_PIN);
+LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+
+const unsigned int RPM_ID = 0x316;
+const unsigned int SPEED_ID = 0x153;
 
 void setup() {
   Serial.begin(115200);
@@ -12,6 +22,14 @@ void setup() {
   } else {
     Serial.println("Error Initializing MCP2515...");
   }
+
+  if (Canbus.init(CANSPEED_500)) {
+    Serial.println("CAN Init ok");
+  } else {
+    Serial.println("Can't init CAN");
+  }
+
+  lcd.begin(16, 2);
 
   Serial.println("Menu:");
   Serial.println("1. Read Engine RPM");
@@ -52,26 +70,36 @@ void loop() {
 }
 
 void processData(long id, unsigned char len, unsigned char* buf) {
-  // Process and display received data based on message ID
-  // Implement your data processing logic here
+  if (id == RPM_ID) {
+    int rpm = ((buf[1] << 8) + buf[2]) / 4;
+
+    // Display RPM on the LCD
+    lcd.setCursor(0, 0);
+    lcd.print("RPM: ");
+    lcd.print(rpm);
+  } else if (id == SPEED_ID) {
+    int speed = buf[3];
+
+    // Display Speed on the LCD
+    lcd.setCursor(0, 1);
+    lcd.print("Speed: ");
+    lcd.print(speed);
+    lcd.print(" km/h");
+  }
 }
 
 void requestEngineRpm() {
   // Send request for engine RPM data
-  // Implement your request logic here
 }
 
 void requestVehicleSpeed() {
   // Send request for vehicle speed data
-  // Implement your request logic here
 }
 
 void clearErrorCodes() {
   // Send request to clear error codes for all modules
-  // Implement your request logic here
 }
 
 void liveStreaming() {
   // Start live streaming feature, periodically request and display data
-  // Implement your live streaming logic here
 }
