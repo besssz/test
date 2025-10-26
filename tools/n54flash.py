@@ -67,6 +67,8 @@ SID_ROUTINE_CONTROL = 0x31  # erase routines
 
 ROUTINE_ERASE_ALL = 0xFF00
 
+BAVARIAN_TECHNIC_DATA_BUFFER_SIZE = 4128
+
 ###############################################################################
 # Flash layout & parameters
 ###############################################################################
@@ -137,208 +139,224 @@ class J2534Error(RuntimeError):
     """Raised when a J2534 API call fails."""
 
 
-class BavarianTechnicBus:
-    """J2534-based FrameBus implementation for the Bavarian Technic USB cable."""
+if platform.system() == "Windows":
 
-    PROTOCOL_CAN = 0x00000002
-    PASS_FILTER = 0x00000001
-    SET_CONFIG = 0x00000001
-    ERR_TIMEOUT = 0x0000000A
-    ERR_BUFFER_EMPTY = 0x00000007
-    DATA_BUFFER_SIZE = 4128
+    class BavarianTechnicBus:
+        """J2534-based FrameBus implementation for the Bavarian Technic USB cable."""
 
-    class PASSTHRU_MSG(ctypes.Structure):
-        _fields_ = [
-            ("ProtocolID", ctypes.c_ulong),
-            ("RxStatus", ctypes.c_ulong),
-            ("TxFlags", ctypes.c_ulong),
-            ("Timestamp", ctypes.c_ulong),
-            ("DataSize", ctypes.c_ulong),
-            ("ExtraDataIndex", ctypes.c_ulong),
-            ("Data", ctypes.c_ubyte * DATA_BUFFER_SIZE),
-        ]
+        PROTOCOL_CAN = 0x00000002
+        PASS_FILTER = 0x00000001
+        SET_CONFIG = 0x00000001
+        ERR_TIMEOUT = 0x0000000A
+        ERR_BUFFER_EMPTY = 0x00000007
+        DATA_BUFFER_SIZE = BAVARIAN_TECHNIC_DATA_BUFFER_SIZE
 
-    class SCONFIG(ctypes.Structure):
-        _fields_ = [("Parameter", ctypes.c_ulong), ("Value", ctypes.c_ulong)]
+        class PASSTHRU_MSG(ctypes.Structure):
+            _fields_ = [
+                ("ProtocolID", ctypes.c_ulong),
+                ("RxStatus", ctypes.c_ulong),
+                ("TxFlags", ctypes.c_ulong),
+                ("Timestamp", ctypes.c_ulong),
+                ("DataSize", ctypes.c_ulong),
+                ("ExtraDataIndex", ctypes.c_ulong),
+                ("Data", ctypes.c_ubyte * BAVARIAN_TECHNIC_DATA_BUFFER_SIZE),
+            ]
 
-    class SCONFIG_LIST(ctypes.Structure):
-        _fields_ = [("NumOfParams", ctypes.c_ulong), ("ConfigPtr", ctypes.POINTER(SCONFIG))]
+        class SCONFIG(ctypes.Structure):
+            _fields_ = [("Parameter", ctypes.c_ulong), ("Value", ctypes.c_ulong)]
 
-    def __init__(self, dll_path: Path | str, channel: int = 0, bitrate: int = 500000):
-        if platform.system() != "Windows":
+        class SCONFIG_LIST(ctypes.Structure):
+            _fields_ = [("NumOfParams", ctypes.c_ulong), ("ConfigPtr", ctypes.POINTER(SCONFIG))]
+
+        def __init__(self, dll_path: Path | str, channel: int = 0, bitrate: int = 500000):
+            if not os.path.exists(dll_path):
+                raise FileNotFoundError(f"J2534 DLL not found: {dll_path}")
+
+            self._dll = ctypes.WinDLL(str(dll_path))
+            self._configure_prototypes()
+            self._device_id = ctypes.c_ulong()
+            self._channel_id = ctypes.c_ulong()
+            self._filter_id = ctypes.c_ulong()
+            self._bitrate = bitrate
+            self._tx_timeout = 1000  # milliseconds
+            self._lock = threading.Lock()
+
+            self._open_device()
+            self._connect(channel)
+            self._apply_bitrate()
+            self._install_pass_filter()
+
+        # ------------------------------------------------------------------
+        # Public FrameBus API
+        def send(self, frame: Frame) -> None:
+            msg = self.PASSTHRU_MSG()
+            msg.ProtocolID = self.PROTOCOL_CAN
+            msg.DataSize = len(frame.data) + 4
+            msg.ExtraDataIndex = 4
+            arb = frame.arbitration_id & 0x1FFFFFFF
+            msg.Data[0] = arb & 0xFF
+            msg.Data[1] = (arb >> 8) & 0xFF
+            msg.Data[2] = (arb >> 16) & 0xFF
+            msg.Data[3] = (arb >> 24) & 0xFF
+            for idx, byte in enumerate(frame.data):
+                msg.Data[4 + idx] = byte
+
+            count = ctypes.c_ulong(1)
+            with self._lock:
+                status = self._dll.PassThruWriteMsgs(
+                    self._channel_id, ctypes.byref(msg), ctypes.byref(count), self._tx_timeout
+                )
+            self._check(status, "PassThruWriteMsgs")
+
+        def recv(self, timeout: float) -> Optional[Frame]:
+            msg = self.PASSTHRU_MSG()
+            count = ctypes.c_ulong(1)
+            timeout_ms = int(max(timeout, 0) * 1000)
+            with self._lock:
+                status = self._dll.PassThruReadMsgs(
+                    self._channel_id, ctypes.byref(msg), ctypes.byref(count), timeout_ms
+                )
+
+            if status in (self.ERR_TIMEOUT, self.ERR_BUFFER_EMPTY):
+                return None
+            self._check(status, "PassThruReadMsgs")
+            if count.value == 0:
+                return None
+
+            arb = msg.Data[0] | (msg.Data[1] << 8) | (msg.Data[2] << 16) | (msg.Data[3] << 24)
+            payload_length = int(msg.DataSize) - 4
+            payload_length = max(0, min(payload_length, len(msg.Data) - 4))
+            data = bytes(msg.Data[4 : 4 + payload_length])
+            return Frame(arb, data)
+
+        def shutdown(self) -> None:
+            with self._lock:
+                if self._filter_id.value:
+                    self._dll.PassThruStopMsgFilter(self._channel_id, self._filter_id)
+                    self._filter_id.value = 0
+                if self._channel_id.value:
+                    self._dll.PassThruDisconnect(self._channel_id)
+                    self._channel_id.value = 0
+                if self._device_id.value:
+                    self._dll.PassThruClose(self._device_id)
+                    self._device_id.value = 0
+
+        # ------------------------------------------------------------------
+        # Internal helpers
+        def _check(self, status: int, api: str) -> None:
+            if status != 0:
+                raise J2534Error(f"{api} failed with status 0x{status:08X}")
+
+        def _configure_prototypes(self) -> None:
+            self._dll.PassThruOpen.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+            self._dll.PassThruOpen.restype = ctypes.c_ulong
+            self._dll.PassThruClose.argtypes = [ctypes.c_ulong]
+            self._dll.PassThruClose.restype = ctypes.c_ulong
+            self._dll.PassThruConnect.argtypes = [
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong),
+            ]
+            self._dll.PassThruConnect.restype = ctypes.c_ulong
+            self._dll.PassThruDisconnect.argtypes = [ctypes.c_ulong]
+            self._dll.PassThruDisconnect.restype = ctypes.c_ulong
+            self._dll.PassThruReadMsgs.argtypes = [
+                ctypes.c_ulong,
+                ctypes.POINTER(self.PASSTHRU_MSG),
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.c_ulong,
+            ]
+            self._dll.PassThruReadMsgs.restype = ctypes.c_ulong
+            self._dll.PassThruWriteMsgs.argtypes = [
+                ctypes.c_ulong,
+                ctypes.POINTER(self.PASSTHRU_MSG),
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.c_ulong,
+            ]
+            self._dll.PassThruWriteMsgs.restype = ctypes.c_ulong
+            self._dll.PassThruStartMsgFilter.argtypes = [
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.POINTER(self.PASSTHRU_MSG),
+                ctypes.POINTER(self.PASSTHRU_MSG),
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_ulong),
+            ]
+            self._dll.PassThruStartMsgFilter.restype = ctypes.c_ulong
+            self._dll.PassThruStopMsgFilter.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
+            self._dll.PassThruStopMsgFilter.restype = ctypes.c_ulong
+            self._dll.PassThruIoctl.argtypes = [
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            self._dll.PassThruIoctl.restype = ctypes.c_ulong
+
+        def _open_device(self) -> None:
+            status = self._dll.PassThruOpen(None, ctypes.byref(self._device_id))
+            self._check(status, "PassThruOpen")
+
+        def _connect(self, channel: int) -> None:
+            _ = channel  # channel selection is handled within the vendor driver
+            channel_id = ctypes.c_ulong()
+            status = self._dll.PassThruConnect(
+                self._device_id, self.PROTOCOL_CAN, 0, self._bitrate, ctypes.byref(channel_id)
+            )
+            self._check(status, "PassThruConnect")
+            self._channel_id = channel_id
+
+        def _apply_bitrate(self) -> None:
+            sconfig = self.SCONFIG(1, self._bitrate)
+            sconfig_list = self.SCONFIG_LIST(1, ctypes.pointer(sconfig))
+            status = self._dll.PassThruIoctl(
+                self._channel_id, self.SET_CONFIG, ctypes.byref(sconfig_list), None
+            )
+            self._check(status, "PassThruIoctl(SET_CONFIG)")
+
+        def _install_pass_filter(self) -> None:
+            mask = self.PASSTHRU_MSG()
+            pattern = self.PASSTHRU_MSG()
+            mask.ProtocolID = self.PROTOCOL_CAN
+            pattern.ProtocolID = self.PROTOCOL_CAN
+            mask.DataSize = pattern.DataSize = 4
+            mask.ExtraDataIndex = pattern.ExtraDataIndex = 4
+            filter_id = ctypes.c_ulong()
+            status = self._dll.PassThruStartMsgFilter(
+                self._channel_id,
+                self.PASS_FILTER,
+                ctypes.byref(mask),
+                ctypes.byref(pattern),
+                None,
+                ctypes.byref(filter_id),
+            )
+            self._check(status, "PassThruStartMsgFilter")
+            self._filter_id = filter_id
+
+        def __del__(self):  # pragma: no cover - cleanup best-effort only
+            try:
+                self.shutdown()
+            except Exception:
+                pass
+
+else:
+
+    class BavarianTechnicBus:
+        """Stub that signals the Bavarian Technic driver is Windows-only."""
+
+        def __init__(self, *args, **kwargs):  # pragma: no cover - platform guard
             raise RuntimeError("The Bavarian Technic driver is only available on Windows")
 
-        if not os.path.exists(dll_path):
-            raise FileNotFoundError(f"J2534 DLL not found: {dll_path}")
+        def send(self, frame: Frame) -> None:  # pragma: no cover - platform guard
+            raise RuntimeError("Bavarian Technic bus unavailable on non-Windows platforms")
 
-        self._dll = ctypes.WinDLL(str(dll_path))
-        self._configure_prototypes()
-        self._device_id = ctypes.c_ulong()
-        self._channel_id = ctypes.c_ulong()
-        self._filter_id = ctypes.c_ulong()
-        self._bitrate = bitrate
-        self._tx_timeout = 1000  # milliseconds
-        self._lock = threading.Lock()
-
-        self._open_device()
-        self._connect(channel)
-        self._apply_bitrate()
-        self._install_pass_filter()
-
-    # ------------------------------------------------------------------
-    # Public FrameBus API
-    def send(self, frame: Frame) -> None:
-        msg = self.PASSTHRU_MSG()
-        msg.ProtocolID = self.PROTOCOL_CAN
-        msg.DataSize = len(frame.data) + 4
-        msg.ExtraDataIndex = 4
-        arb = frame.arbitration_id & 0x1FFFFFFF
-        msg.Data[0] = arb & 0xFF
-        msg.Data[1] = (arb >> 8) & 0xFF
-        msg.Data[2] = (arb >> 16) & 0xFF
-        msg.Data[3] = (arb >> 24) & 0xFF
-        for idx, byte in enumerate(frame.data):
-            msg.Data[4 + idx] = byte
-
-        count = ctypes.c_ulong(1)
-        with self._lock:
-            status = self._dll.PassThruWriteMsgs(
-                self._channel_id, ctypes.byref(msg), ctypes.byref(count), self._tx_timeout
-            )
-        self._check(status, "PassThruWriteMsgs")
-
-    def recv(self, timeout: float) -> Optional[Frame]:
-        msg = self.PASSTHRU_MSG()
-        count = ctypes.c_ulong(1)
-        timeout_ms = int(max(timeout, 0) * 1000)
-        with self._lock:
-            status = self._dll.PassThruReadMsgs(
-                self._channel_id, ctypes.byref(msg), ctypes.byref(count), timeout_ms
-            )
-
-        if status in (self.ERR_TIMEOUT, self.ERR_BUFFER_EMPTY):
-            return None
-        self._check(status, "PassThruReadMsgs")
-        if count.value == 0:
+        def recv(self, timeout: float) -> Optional[Frame]:  # pragma: no cover - platform guard
             return None
 
-        arb = msg.Data[0] | (msg.Data[1] << 8) | (msg.Data[2] << 16) | (msg.Data[3] << 24)
-        payload_length = int(msg.DataSize) - 4
-        payload_length = max(0, min(payload_length, len(msg.Data) - 4))
-        data = bytes(msg.Data[4 : 4 + payload_length])
-        return Frame(arb, data)
-
-    def shutdown(self) -> None:
-        with self._lock:
-            if self._filter_id.value:
-                self._dll.PassThruStopMsgFilter(self._channel_id, self._filter_id)
-                self._filter_id.value = 0
-            if self._channel_id.value:
-                self._dll.PassThruDisconnect(self._channel_id)
-                self._channel_id.value = 0
-            if self._device_id.value:
-                self._dll.PassThruClose(self._device_id)
-                self._device_id.value = 0
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    def _check(self, status: int, api: str) -> None:
-        if status != 0:
-            raise J2534Error(f"{api} failed with status 0x{status:08X}")
-
-    def _configure_prototypes(self) -> None:
-        self._dll.PassThruOpen.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
-        self._dll.PassThruOpen.restype = ctypes.c_ulong
-        self._dll.PassThruClose.argtypes = [ctypes.c_ulong]
-        self._dll.PassThruClose.restype = ctypes.c_ulong
-        self._dll.PassThruConnect.argtypes = [
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.POINTER(ctypes.c_ulong),
-        ]
-        self._dll.PassThruConnect.restype = ctypes.c_ulong
-        self._dll.PassThruDisconnect.argtypes = [ctypes.c_ulong]
-        self._dll.PassThruDisconnect.restype = ctypes.c_ulong
-        self._dll.PassThruReadMsgs.argtypes = [
-            ctypes.c_ulong,
-            ctypes.POINTER(self.PASSTHRU_MSG),
-            ctypes.POINTER(ctypes.c_ulong),
-            ctypes.c_ulong,
-        ]
-        self._dll.PassThruReadMsgs.restype = ctypes.c_ulong
-        self._dll.PassThruWriteMsgs.argtypes = [
-            ctypes.c_ulong,
-            ctypes.POINTER(self.PASSTHRU_MSG),
-            ctypes.POINTER(ctypes.c_ulong),
-            ctypes.c_ulong,
-        ]
-        self._dll.PassThruWriteMsgs.restype = ctypes.c_ulong
-        self._dll.PassThruStartMsgFilter.argtypes = [
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.POINTER(self.PASSTHRU_MSG),
-            ctypes.POINTER(self.PASSTHRU_MSG),
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_ulong),
-        ]
-        self._dll.PassThruStartMsgFilter.restype = ctypes.c_ulong
-        self._dll.PassThruStopMsgFilter.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
-        self._dll.PassThruStopMsgFilter.restype = ctypes.c_ulong
-        self._dll.PassThruIoctl.argtypes = [
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        self._dll.PassThruIoctl.restype = ctypes.c_ulong
-
-    def _open_device(self) -> None:
-        status = self._dll.PassThruOpen(None, ctypes.byref(self._device_id))
-        self._check(status, "PassThruOpen")
-
-    def _connect(self, channel: int) -> None:
-        _ = channel  # channel selection is handled within the vendor driver
-        channel_id = ctypes.c_ulong()
-        status = self._dll.PassThruConnect(
-            self._device_id, self.PROTOCOL_CAN, 0, self._bitrate, ctypes.byref(channel_id)
-        )
-        self._check(status, "PassThruConnect")
-        self._channel_id = channel_id
-
-    def _apply_bitrate(self) -> None:
-        sconfig = self.SCONFIG(1, self._bitrate)
-        sconfig_list = self.SCONFIG_LIST(1, ctypes.pointer(sconfig))
-        status = self._dll.PassThruIoctl(
-            self._channel_id, self.SET_CONFIG, ctypes.byref(sconfig_list), None
-        )
-        self._check(status, "PassThruIoctl(SET_CONFIG)")
-
-    def _install_pass_filter(self) -> None:
-        mask = self.PASSTHRU_MSG()
-        pattern = self.PASSTHRU_MSG()
-        mask.ProtocolID = self.PROTOCOL_CAN
-        pattern.ProtocolID = self.PROTOCOL_CAN
-        mask.DataSize = pattern.DataSize = 4
-        mask.ExtraDataIndex = pattern.ExtraDataIndex = 4
-        filter_id = ctypes.c_ulong()
-        status = self._dll.PassThruStartMsgFilter(
-            self._channel_id,
-            self.PASS_FILTER,
-            ctypes.byref(mask),
-            ctypes.byref(pattern),
-            None,
-            ctypes.byref(filter_id),
-        )
-        self._check(status, "PassThruStartMsgFilter")
-        self._filter_id = filter_id
-
-    def __del__(self):  # pragma: no cover - cleanup best-effort only
-        try:
-            self.shutdown()
-        except Exception:
-            pass
+        def shutdown(self) -> None:  # pragma: no cover - platform guard
+            return None
 
 
 ###############################################################################
@@ -459,6 +477,32 @@ class TesterPresentThread(threading.Thread):
 ###############################################################################
 
 
+@dataclass
+class EcuIdentity:
+    """Container for ECU identity strings decoded from 0x1A identifiers."""
+
+    decoded: dict[str, str]
+    raw: dict[int, bytes]
+
+    def __bool__(self) -> bool:  # pragma: no cover - trivial
+        return bool(self.decoded or self.raw)
+
+
+ECU_ID_LABELS: dict[int, str] = {
+    0x90: "VIN",
+    0x92: "ECU HW",
+    0x94: "ECU SW",
+    0x97: "ECU CAL",
+}
+
+
+def _decode_ascii_field(value: bytes) -> str:
+    """Decode VIN/part number strings reported by MSD80 identifiers."""
+
+    head, _, _ = value.partition(b"\x00")
+    return head.decode("ascii", errors="ignore").strip()
+
+
 class Flasher:
     def __init__(self, bus: FrameBus, timeout: float = 1.0):
         self.bus = bus
@@ -490,15 +534,19 @@ class Flasher:
         LOG.info("Security access granted")
 
     # ----- Information -----------------------------------------------------
-    def read_ecu_id(self) -> dict[str, bytes]:
-        identifiers: Iterable[bytes] = [b"\x90", b"\x92", b"\x94", b"\x97"]
-        result: dict[str, bytes] = {}
+    def read_ecu_id(self) -> EcuIdentity:
+        identifiers: Iterable[int] = [0x90, 0x92, 0x94, 0x97]
+        decoded: dict[str, str] = {}
+        raw: dict[int, bytes] = {}
         for ident in identifiers:
-            resp = self._kwp(SID_READ_ECU_ID, ident)
+            resp = self._kwp(SID_READ_ECU_ID, bytes([ident]))
             if resp and resp[0] == pos(SID_READ_ECU_ID):
-                label = f"0x{ident.hex()}"
-                result[label] = resp[2:]
-        return result
+                payload = resp[2:]
+                raw[ident] = payload
+                label = ECU_ID_LABELS.get(ident)
+                if label:
+                    decoded[label] = _decode_ascii_field(payload)
+        return EcuIdentity(decoded=decoded, raw=raw)
 
     # ----- Memory helpers --------------------------------------------------
     def read_block(self, addr: int, length: int) -> bytes:
@@ -724,10 +772,13 @@ def main() -> None:
         flasher.security_unlock()
 
         if args.info:
-            ecu_ids = flasher.read_ecu_id()
-            if ecu_ids:
-                for key, value in ecu_ids.items():
-                    LOG.info("ECU ID %s: %s", key, value.hex())
+            identity = flasher.read_ecu_id()
+            if identity:
+                for label, value in identity.decoded.items():
+                    LOG.info("%s: %s", label, value)
+                unknown = {k: v for k, v in identity.raw.items() if k not in ECU_ID_LABELS}
+                for ident, payload in sorted(unknown.items()):
+                    LOG.info("ECU ID 0x%02X: %s", ident, payload.hex())
             else:
                 LOG.warning("ECU did not return any identifiers")
 
